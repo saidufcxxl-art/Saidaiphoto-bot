@@ -5,9 +5,8 @@ import replicate
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, LabeledPrice
+from aiohttp import web
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -16,11 +15,7 @@ REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
-
 users = {}
-
-class Form(StatesGroup):
-    waiting_for_photo = State()
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
@@ -40,10 +35,7 @@ async def handle_photo(message: Message):
     user_data = users.get(user_id, {'last_free_date': None, 'paid_credits': 0})
     today = "2026-09-24"
     if user_data['last_free_date'] == today and user_data['paid_credits'] <= 0:
-        await message.answer(
-            "На сегодня бесплатные фото закончились. 😔\n"
-            "Купи пакет за звёзды! Напиши /buy."
-        )
+        await message.answer("На сегодня бесплатные фото закончились. 😔\nКупи пакет за звёзды! Напиши /buy.")
         return
     await message.answer("Фото получил! Генерирую... ⏳")
     file_id = message.photo[-1].file_id
@@ -52,11 +44,7 @@ async def handle_photo(message: Message):
     try:
         output = replicate.run(
             "black-forest-labs/flux-2-pro",
-            input={
-                "image": file_url,
-                "prompt": "Фотореалистичный портрет, высокое качество, детализированное лицо",
-                "aspect_ratio": "1:1"
-            }
+            input={"image": file_url, "prompt": "Фотореалистичный портрет, высокое качество", "aspect_ratio": "1:1"}
         )
         await message.answer_photo(output[0], caption="Готово! 🎉")
         users[user_id]['last_free_date'] = today
@@ -66,13 +54,7 @@ async def handle_photo(message: Message):
 @dp.message(Command("buy"))
 async def cmd_buy(message: Message):
     prices = [LabeledPrice(label="Пакет 'Мини' (5 фото)", amount=150)]
-    await message.answer_invoice(
-        title="Пакет ИИ-фото",
-        description="5 генераций без водяного знака",
-        payload="buy_5_credits",
-        currency="XTR",
-        prices=prices
-    )
+    await message.answer_invoice(title="Пакет ИИ-фото", description="5 генераций без водяного знака", payload="buy_5_credits", currency="XTR", prices=prices)
 
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery):
@@ -84,7 +66,18 @@ async def process_successful_payment(message: Message):
     users[user_id]['paid_credits'] += 5
     await message.answer("Оплата прошла! Начислено 5 кредитов. 🎉")
 
+async def handle(request):
+    return web.Response(text="Bot is running")
+
 async def main():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Web server started on port {port}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
