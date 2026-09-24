@@ -44,9 +44,17 @@ async def handle_photo(message: Message):
     try:
         output = replicate.run(
             "black-forest-labs/flux-2-pro",
-            input={"image": file_url, "prompt": "Фотореалистичный портрет, высокое качество", "aspect_ratio": "1:1"}
+            input={
+                "image": file_url,
+                "prompt": "Фотореалистичный портрет, высокое качество, детализированное лицо",
+                "aspect_ratio": "1:1"
+            }
         )
-        await message.answer_photo(output[0], caption="Готово! 🎉")
+        if isinstance(output, list):
+            result_url = output[0]
+        else:
+            result_url = str(output)
+        await message.answer_photo(result_url, caption="Готово! 🎉")
         users[user_id]['last_free_date'] = today
     except Exception as e:
         await message.answer(f"Ошибка генерации: {e}")
@@ -54,7 +62,13 @@ async def handle_photo(message: Message):
 @dp.message(Command("buy"))
 async def cmd_buy(message: Message):
     prices = [LabeledPrice(label="Пакет 'Мини' (5 фото)", amount=150)]
-    await message.answer_invoice(title="Пакет ИИ-фото", description="5 генераций без водяного знака", payload="buy_5_credits", currency="XTR", prices=prices)
+    await message.answer_invoice(
+        title="Пакет ИИ-фото",
+        description="5 генераций без водяного знака",
+        payload="buy_5_credits",
+        currency="XTR",
+        prices=prices
+    )
 
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery):
