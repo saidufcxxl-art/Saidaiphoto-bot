@@ -41,7 +41,7 @@ async def handle_photo(message: Message):
     file_id = message.photo[-1].file_id
     file = await bot.get_file(file_id)
     file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-    ttry:
+    try:
         face_output = replicate.run(
             "fofr/face-to-many:a07f252abbbd832009640b27f063ea52d87d7a23a185ca165bec23b5adc8deaf",
             input={
@@ -53,7 +53,6 @@ async def handle_photo(message: Message):
             }
         )
         face_image_url = face_output[0].url() if isinstance(face_output, list) else str(face_output)
-
         final_output = replicate.run(
             "black-forest-labs/flux-kontext-dev",
             input={
@@ -62,15 +61,12 @@ async def handle_photo(message: Message):
                 "aspect_ratio": "1:1"
             }
         )
-        
         if isinstance(final_output, list):
             result_url = final_output[0]
         else:
             result_url = str(final_output)
-            
         await message.answer_photo(result_url, caption="Готово! 🎉")
         users[user_id]['last_free_date'] = today
-
     except Exception as e:
         await message.answer(f"Ошибка генерации: {e}")
 
