@@ -1,1049 +1,355 @@
-import asyncio
-import logging
-import os
-import sqlite3
-from datetime import datetime
-
-import replicate
-from dotenv import load_dotenv
-
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
-from aiogram.types import Message, LabeledPrice
-
-from aiohttp import web
-
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
-
-ADMIN_IDS = [
-    int(x)
-    for x in os.getenv("ADMIN_IDS", "").split(",")
-    if x.strip()
-]
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN не найден в .env")
-
-if not REPLICATE_API_TOKEN:
-    raise RuntimeError("REPLICATE_API_TOKEN не найден в .env")
-
-
-os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_TOKEN
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
-
-FREE_GENERATIONS = 2
-
-DATABASE = "bot.db"
-
-PACKAGES = {
-    50: 5,
-    100: 10,
-    150: 15,
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Photo Bot</title>
+<style>
+* {
+    box-sizing: border-box;
 }
-
-
-# ============================================================
-# BOT
-# ============================================================
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-logging.basicConfig(
-    level=logging.INFO
-)
-
-
-# ============================================================
-# SQLITE
-# ============================================================
-
-def db_connect():
-    conn = sqlite3.connect(
-        DATABASE,
-        check_same_thread=False
-    )
-
-    conn.row_factory = sqlite3.Row
-
-    return conn
-
-
-def init_db():
-
-    conn = db_connect()
-
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            free_used INTEGER NOT NULL DEFAULT 0,
-            paid_credits INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS payments (
-            payment_id TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            stars INTEGER NOT NULL,
-            credits INTEGER NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-def get_user(user_id: int):
-
-    conn = db_connect()
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        "SELECT * FROM users WHERE user_id = ?",
-        (user_id,)
-    )
-
-    user = cursor.fetchone()
-
-    if user is None:
-
-        cursor.execute(
-            """
-            INSERT INTO users
-            (user_id, free_used, paid_credits, created_at)
-            VALUES (?, 0, 0, ?)
-            """,
-            (
-                user_id,
-                datetime.utcnow().isoformat()
-            )
-        )
-
-        conn.commit()
-
-        cursor.execute(
-            "SELECT * FROM users WHERE user_id = ?",
-            (user_id,)
-        )
-
-        user = cursor.fetchone()
-
-    conn.close()
-
-    return user
-
-
-def get_balance(user_id: int):
-
-    user = get_user(user_id)
-
-    free_left = max(
-        0,
-        FREE_GENERATIONS - user["free_used"]
-    )
-
-    paid = user["paid_credits"]
-
-    return free_left + paid
-
-
-def consume_generation(user_id: int):
-
-    if user_id in ADMIN_IDS:
-        return True
-
-    conn = db_connect()
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT free_used, paid_credits
-        FROM users
-        WHERE user_id = ?
-        """,
-        (user_id,)
-    )
-
-    user = cursor.fetchone()
-
-    if not user:
-        conn.close()
-        return False
-
-    # Сначала бесплатные
-    if user["free_used"] < FREE_GENERATIONS:
-
-        cursor.execute(
-            """
-            UPDATE users
-            SET free_used = free_used + 1
-            WHERE user_id = ?
-            """,
-            (user_id,)
-        )
-
-        conn.commit()
-        conn.close()
-
-        return True
-
-    # Потом платные
-    if user["paid_credits"] > 0:
-
-        cursor.execute(
-            """
-            UPDATE users
-            SET paid_credits = paid_credits - 1
-            WHERE user_id = ?
-            """,
-            (user_id,)
-        )
-
-        conn.commit()
-        conn.close()
-
-        return True
-
-    conn.close()
-
-    return False
-
-
-def payment_exists(payment_id: str):
-
-    conn = db_connect()
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT payment_id
-        FROM payments
-        WHERE payment_id = ?
-        """,
-        (payment_id,)
-    )
-
-    result = cursor.fetchone()
-
-    conn.close()
-
-    return result is not None
-
-
-def save_payment(
-    payment_id: str,
-    user_id: int,
-    stars: int,
-    credits: int
-):
-
-    conn = db_connect()
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        INSERT INTO payments
-        (payment_id, user_id, stars, credits, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            payment_id,
-            user_id,
-            stars,
-            credits,
-            datetime.utcnow().isoformat()
-        )
-    )
-
-    cursor.execute(
-        """
-        UPDATE users
-        SET paid_credits = paid_credits + ?
-        WHERE user_id = ?
-        """,
-        (
-            credits,
-            user_id
-        )
-    )
-
-    conn.commit()
-
-    conn.close()
-
-
-# ============================================================
-# ADMIN
-# ============================================================
-
-def is_admin(user_id: int):
-
-    return user_id in ADMIN_IDS
-
-
-# ============================================================
-# START
-# ============================================================
-
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-
-    user_id = message.from_user.id
-
-    user = get_user(user_id)
-
-    if is_admin(user_id):
-
-        text = """
-👑 AI PHOTO BOT
-
-Ты администратор.
-
-Безлимитные генерации.
-
-📸 Отправь фото и напиши, что нужно сделать.
-"""
-
-    else:
-
-        free_left = max(
-            0,
-            FREE_GENERATIONS - user["free_used"]
-        )
-
-        text = f"""
-🎨 AI PHOTO
-
-Создавай реалистичные фотографии с помощью AI.
-
-🎁 Бесплатно: {free_left} из {FREE_GENERATIONS}
-
-Как пользоваться:
-
-1️⃣ Отправь свою фотографию.
-
-2️⃣ Если нужно перенести себя в другую сцену —
-отправь вторую фотографию-пример.
-
-3️⃣ Напиши, что нужно сделать.
-
-Пример:
-
-«Поставь меня на пляж вместо человека
-на второй фотографии».
-
-Другие примеры:
-
-🏖 Поставь меня на пляж
-🌆 Сделай меня в Нью-Йорке
-🖤 Сделай чёрно-белое фото
-👔 Одень меня в костюм
-📸 Сделай профессиональную фотосессию
-
-⭐ Пакеты:
-
-50 Stars — 5 фото
-100 Stars — 10 фото
-150 Stars — 15 фото
-
-📊 /balance
-⭐ /buy
-🗑 /clear
-"""
-
-    await message.answer(text)
-
-
-# ============================================================
-# BALANCE
-# ============================================================
-
-@dp.message(Command("balance"))
-async def cmd_balance(message: Message):
-
-    user_id = message.from_user.id
-
-    if is_admin(user_id):
-
-        await message.answer(
-            "👑 Администратор\n\n"
-            "Безлимитные генерации."
-        )
-
-        return
-
-    user = get_user(user_id)
-
-    free_left = max(
-        0,
-        FREE_GENERATIONS - user["free_used"]
-    )
-
-    paid = user["paid_credits"]
-
-    total = free_left + paid
-
-    await message.answer(
-        "📊 ТВОЙ БАЛАНС\n\n"
-        f"🎁 Бесплатных: {free_left}\n"
-        f"⭐ Купленных: {paid}\n\n"
-        f"📸 Всего доступно: {total}"
-    )
-
-
-# ============================================================
-# CLEAR
-# ============================================================
-
-pending_photos = {}
-
-
-@dp.message(Command("clear"))
-async def cmd_clear(message: Message):
-
-    user_id = message.from_user.id
-
-    pending_photos.pop(
-        user_id,
-        None
-    )
-
-    await message.answer(
-        "🗑 Очищено.\n\n"
-        "Отправь новые фотографии."
-    )
-
-
-# ============================================================
-# BUY
-# ============================================================
-
-@dp.message(Command("buy"))
-async def cmd_buy(message: Message):
-
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text="⭐ 50 Stars — 5 фото",
-                    callback_data="buy_50"
-                )
-            ],
-            [
-                types.InlineKeyboardButton(
-                    text="⭐ 100 Stars — 10 фото",
-                    callback_data="buy_100"
-                )
-            ],
-            [
-                types.InlineKeyboardButton(
-                    text="⭐ 150 Stars — 15 фото",
-                    callback_data="buy_150"
-                )
-            ]
-        ]
-    )
-
-    await message.answer(
-        """
-⭐ КУПИТЬ ФОТО
-
-Выбери пакет:
-
-⭐ 50 Stars → 5 фото
-⭐ 100 Stars → 10 фото
-⭐ 150 Stars → 15 фото
-""",
-        reply_markup=keyboard
-    )
-
-
-# ============================================================
-# CREATE INVOICE
-# ============================================================
-
-@dp.callback_query(F.data.startswith("buy_"))
-async def buy_package(
-    callback: types.CallbackQuery
-):
-
-    stars = int(
-        callback.data.split("_")[1]
-    )
-
-    credits = PACKAGES[stars]
-
-    await callback.answer()
-
-    await bot.send_invoice(
-        chat_id=callback.from_user.id,
-
-        title=f"AI Photo — {credits} фото",
-
-        description=(
-            f"{credits} генераций "
-            f"AI-фотографий."
-        ),
-
-        payload=f"buy_{stars}_{credits}",
-
-        currency="XTR",
-
-        prices=[
-            LabeledPrice(
-                label=f"{credits} AI-фото",
-                amount=stars
-            )
-        ]
-    )
-
-
-# ============================================================
-# PRE CHECKOUT
-# ============================================================
-
-@dp.pre_checkout_query()
-async def process_pre_checkout(
-    pre_checkout_query: types.PreCheckoutQuery
-):
-
-    await bot.answer_pre_checkout_query(
-        pre_checkout_query.id,
-        ok=True
-    )
-
-
-# ============================================================
-# SUCCESS PAYMENT
-# ============================================================
-
-@dp.message(F.successful_payment)
-async def process_successful_payment(
-    message: Message
-):
-
-    user_id = message.from_user.id
-
-    payment = message.successful_payment
-
-    payment_id = payment.telegram_payment_charge_id
-
-    payload = payment.invoice_payload
-
-    # Защита от повторного начисления
-    if payment_exists(payment_id):
-
-        await message.answer(
-            "ℹ️ Этот платёж уже обработан."
-        )
-
-        return
-
-    parts = payload.split("_")
-
-    if len(parts) != 3:
-
-        await message.answer(
-            "❌ Ошибка платежа."
-        )
-
-        return
-
-    stars = int(parts[1])
-
-    credits = int(parts[2])
-
-    save_payment(
-        payment_id=payment_id,
-        user_id=user_id,
-        stars=stars,
-        credits=credits
-    )
-
-    balance = get_balance(user_id)
-
-    await message.answer(
-        "✅ ОПЛАТА УСПЕШНА!\n\n"
-        f"⭐ Оплачено: {stars} Stars\n"
-        f"📸 Начислено: {credits} фото\n\n"
-        f"📊 Доступно всего: {balance} генераций."
-    )
-
-
-# ============================================================
-# RECEIVE PHOTO
-# ============================================================
-
-@dp.message(F.photo)
-async def handle_photo(message: Message):
-
-    user_id = message.from_user.id
-
-    if get_balance(user_id) <= 0:
-
-        await message.answer(
-            "❌ У тебя закончились генерации.\n\n"
-            "⭐ Купи новый пакет:\n\n"
-            "50 Stars — 5 фото\n"
-            "100 Stars — 10 фото\n"
-            "150 Stars — 15 фото\n\n"
-            "/buy"
-        )
-
-        return
-
-    file_id = message.photo[-1].file_id
-
-    caption = message.caption
-
-    if user_id not in pending_photos:
-
-        pending_photos[user_id] = []
-
-    if len(pending_photos[user_id]) >= 2:
-
-        await message.answer(
-            "⚠️ Максимум 2 фотографии.\n\n"
-            "Теперь напиши, что нужно сделать."
-        )
-
-        return
-
-    pending_photos[user_id].append(
-        file_id
-    )
-
-    # Если инструкция написана прямо под фото
-    if caption:
-
-        photos = pending_photos.pop(
-            user_id
-        )
-
-        await generate_and_send(
-            message,
-            photos,
-            caption,
-            user_id
-        )
-
-        return
-
-    count = len(
-        pending_photos[user_id]
-    )
-
-    if count == 1:
-
-        await message.answer(
-            """
-✅ Первое фото получил.
-
-Теперь можешь:
-
-📸 отправить второе фото-пример
-
-или
-
-✍️ написать инструкцию.
-
-Например:
-
-«Поставь меня на пляж».
-"""
-        )
-
-    else:
-
-        await message.answer(
-            """
-✅ Получил 2 фотографии.
-
-Теперь напиши, что нужно сделать.
-
-Например:
-
-«Поставь меня вместо человека
-на второй фотографии».
-"""
-        )
-
-
-# ============================================================
-# TEXT PROMPT
-# ============================================================
-
-@dp.message(F.text)
-async def handle_text(message: Message):
-
-    user_id = message.from_user.id
-
-    if message.text.startswith("/"):
-        return
-
-    if (
-        user_id in pending_photos
-        and pending_photos[user_id]
-    ):
-
-        photos = pending_photos.pop(
-            user_id
-        )
-
-        await generate_and_send(
-            message,
-            photos,
-            message.text,
-            user_id
-        )
-
-        return
-
-    await message.answer(
-        "📸 Сначала отправь фотографию."
-    )
-
-
-# ============================================================
-# AI GENERATION
-# ============================================================
-
-async def generate_and_send(
-    message: Message,
-    photo_ids: list,
-    prompt: str,
-    user_id: int
-):
-
-    # Проверка перед запуском
-    if get_balance(user_id) <= 0:
-
-        await message.answer(
-            "❌ Нет доступных генераций.\n\n"
-            "Используй /buy"
-        )
-
-        return
-
-    await message.answer(
-        """
-🎨 Создаю фотографию...
-
-⏳ Подожди немного.
-"""
-    )
-
-    try:
-
-        file_urls = []
-
-        for file_id in photo_ids[:2]:
-
-            telegram_file = await bot.get_file(
-                file_id
-            )
-
-            file_url = (
-                f"https://api.telegram.org/file/bot"
-                f"{BOT_TOKEN}/"
-                f"{telegram_file.file_path}"
-            )
-
-            file_urls.append(
-                file_url
-            )
-
-        # ====================================================
-        # QUALITY PROMPT
-        # ====================================================
-
-        quality_prompt = """
-Create a highly realistic professional photograph.
-
-Preserve the person's identity and recognizable facial
-features.
-
-Preserve natural face shape, skin texture, hairstyle
-and important characteristics.
-
-Do not unnecessarily alter the person's identity.
-
-Maintain realistic anatomy, hands, fingers, eyes,
-body proportions and facial symmetry.
-
-Use physically realistic lighting and shadows.
-
-Match perspective, depth of field, color temperature,
-reflections and environmental lighting.
-
-Make the final result look like a real photograph
-taken with a professional camera.
-
-Natural skin texture.
-
-Detailed hair.
-
-Detailed clothing.
-
-Sharp subject.
-
-Realistic environment.
-
-Photorealistic.
-
-Professional photography.
-
-Do not create an illustration.
-
-Do not create a cartoon.
-
-Do not create CGI-looking skin.
-
-Do not over-smooth the face.
-"""
-
-        full_prompt = f"""
-USER REQUEST:
-
-{prompt}
-
-IMAGE EDITING INSTRUCTIONS:
-
-{quality_prompt}
-"""
-
-        # ====================================================
-        # ONE PHOTO
-        # ====================================================
-
-        if len(file_urls) == 1:
-
-            output = replicate.run(
-                "black-forest-labs/flux-kontext-max",
-
-                input={
-                    "input_image": file_urls[0],
-
-                    "prompt": full_prompt,
-
-                    "aspect_ratio": "match_input_image",
-
-                    "output_format": "png",
-
-                    "safety_tolerance": 2,
-
-                    "prompt_upsampling": True
-                }
-            )
-
-        # ====================================================
-        # TWO PHOTOS
-        # ====================================================
-
-        else:
-
-            full_prompt = f"""
-Use IMAGE 1 as the main person's identity.
-
-Use IMAGE 2 as the reference scene/environment.
-
-USER REQUEST:
-
-{prompt}
-
-Place the person from IMAGE 1 naturally into
-the environment from IMAGE 2.
-
-Preserve the person's identity.
-
-Match:
-
-- lighting
-- shadows
-- perspective
-- camera angle
-- depth of field
-- color temperature
-- environment
-- scale
-- body proportions
-
-Make the person look naturally photographed
-in the second scene.
-
-Do not make it look like a collage.
-
-Do not simply paste the person onto the background.
-
-Create a seamless realistic photograph.
-
-{quality_prompt}
-"""
-
-            output = replicate.run(
-                "flux-kontext-apps/multi-image-kontext-max",
-
-                input={
-                    "prompt": full_prompt,
-
-                    "input_image_1": file_urls[0],
-
-                    "input_image_2": file_urls[1],
-
-                    "aspect_ratio": "match_input_image",
-
-                    "output_format": "png",
-
-                    "safety_tolerance": 2
-                }
-            )
-
-        # ====================================================
-        # RESULT
-        # ====================================================
-
-        if isinstance(output, list):
-
-            result_url = str(
-                output[0]
-            )
-
-        elif hasattr(output, "url"):
-
-            result_url = str(
-                output.url
-            )
-
-        else:
-
-            result_url = str(
-                output
-            )
-
-        # ====================================================
-        # CONSUME CREDIT
-        # ====================================================
-
-        consumed = consume_generation(
-            user_id
-        )
-
-        if not consumed:
-
-            await message.answer(
-                "❌ Не удалось списать генерацию."
-            )
-
-            return
-
-        remaining = get_balance(
-            user_id
-        )
-
-        await message.answer_photo(
-            result_url,
-
-            caption=(
-                "✅ Готово!\n\n"
-                f"📸 Осталось: {remaining}"
-            )
-        )
-
-    except Exception:
-
-        logging.exception(
-            "AI generation error"
-        )
-
-        await message.answer(
-            """
-❌ Не удалось создать изображение.
-
-Попробуй ещё раз.
-
-Твоя генерация за ошибку
-не должна списываться.
-"""
-        )
-
-
-# ============================================================
-# WEB SERVER
-# ============================================================
-
-async def handle(request):
-
-    return web.Response(
-        text="AI Photo Bot is running"
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-async def main():
-
-    init_db()
-
-    app = web.Application()
-
-    app.router.add_get(
-        "/",
-        handle
-    )
-
-    runner = web.AppRunner(
-        app
-    )
-
-    await runner.setup()
-
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
-    )
-
-    site = web.TCPSite(
-        runner,
-        "0.0.0.0",
-        port
-    )
-
-    await site.start()
-
-    logging.info(
-        f"Web server started on port {port}"
-    )
-
-    await dp.start_polling(
-        bot
-    )
-
-
-if __name__ == "__main__":
-
-    asyncio.run(main())
+body {
+    margin: 0;
+    font-family: Arial, Helvetica, sans-serif;
+    background: #f5f7fa;
+    color: #222;
+}
+.header {
+    background: white;
+    border-bottom: 1px solid #e5e5e5;
+    padding: 18px 25px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.logo {
+    font-size: 25px;
+    font-weight: 800;
+    color: #168de2;
+}
+.telegram {
+    background: #168de2;
+    color: white;
+    padding: 11px 18px;
+    border-radius: 10px;
+    text-decoration: none;
+    font-weight: 700;
+}
+.container {
+    max-width: 900px;
+    margin: 35px auto;
+    padding: 0 18px;
+}
+.hero {
+    background: white;
+    border-radius: 22px;
+    padding: 45px 25px;
+    text-align: center;
+    box-shadow: 0 5px 25px rgba(0,0,0,.05);
+}
+.hero h1 {
+    font-size: 34px;
+    margin-bottom: 12px;
+}
+.hero p {
+    color: #707070;
+    font-size: 17px;
+    line-height: 1.6;
+}
+.start {
+    display: inline-block;
+    margin-top: 20px;
+    background: #168de2;
+    color: white;
+    text-decoration: none;
+    padding: 15px 28px;
+    border-radius: 12px;
+    font-size: 17px;
+    font-weight: bold;
+}
+.section {
+    background: white;
+    margin-top: 20px;
+    padding: 25px;
+    border-radius: 20px;
+}
+.section h2 {
+    margin-top: 0;
+}
+.steps {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 15px;
+}
+.step {
+    background: #f7f8fa;
+    padding: 20px;
+    border-radius: 16px;
+}
+.number {
+    width: 35px;
+    height: 35px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #168de2;
+    color: white;
+    border-radius: 50%;
+    font-weight: bold;
+    margin-bottom: 12px;
+}
+.prices {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 15px;
+}
+.price {
+    border: 1px solid #e2e2e2;
+    border-radius: 17px;
+    padding: 25px 15px;
+    text-align: center;
+}
+.price strong {
+    font-size: 27px;
+    display: block;
+}
+.price .photos {
+    color: #777;
+    margin: 10px 0 18px;
+}
+.buy {
+    display: block;
+    background: #168de2;
+    color: white;
+    text-decoration: none;
+    padding: 11px;
+    border-radius: 10px;
+    font-weight: bold;
+}
+.free {
+    background: #e9f7ee;
+    border: 1px solid #b8e4c5;
+    border-radius: 16px;
+    padding: 18px;
+    margin-top: 15px;
+}
+.examples {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+.example {
+    background: #f7f8fa;
+    padding: 17px;
+    border-radius: 13px;
+}
+.footer {
+    text-align: center;
+    color: #888;
+    padding: 35px 10px;
+    font-size: 13px;
+}
+@media(max-width: 650px) {
+    .steps,
+    .prices,
+    .examples {
+        grid-template-columns: 1fr;
+    }
+    .hero h1 {
+        font-size: 27px;
+    }
+}
+</style>
+</head>
+<body>
+<header class="header">
+    <div class="logo">
+        AI PHOTO
+    </div>
+    <a
+        class="telegram"
+        href="https://t.me/YOUR_BOT_USERNAME"
+        target="_blank"
+    >
+        Открыть бота
+    </a>
+</header>
+<main class="container">
+    <section class="hero">
+        <h1>
+            Создавай фотографии с помощью ИИ
+        </h1>
+        <p>
+            Загрузи фотографию и напиши обычными словами,
+            что хочешь изменить.
+            ИИ создаст новую реалистичную фотографию.
+        </p>
+        <a
+            class="start"
+            href="https://t.me/YOUR_BOT_USERNAME"
+            target="_blank"
+        >
+            🚀 Запустить бота
+        </a>
+    </section>
+    <section class="section">
+        <h2>
+            🎁 2 фотографии бесплатно
+        </h2>
+        <div class="free">
+            Каждый новый пользователь получает
+            <b>2 бесплатные генерации</b>.
+            <br><br>
+            После использования бесплатных генераций
+            можно купить дополнительные фотографии
+            за Telegram Stars ⭐.
+        </div>
+    </section>
+    <section class="section">
+        <h2>
+            Как это работает
+        </h2>
+        <div class="steps">
+            <div class="step">
+                <div class="number">
+                    1
+                </div>
+                <b>Отправь фото</b>
+                <p>
+                    Отправь одну или несколько фотографий
+                    в Telegram-бот.
+                </p>
+            </div>
+            <div class="step">
+                <div class="number">
+                    2
+                </div>
+                <b>Напиши запрос</b>
+                <p>
+                    Напиши обычными словами,
+                    что нужно изменить.
+                </p>
+            </div>
+            <div class="step">
+                <div class="number">
+                    3
+                </div>
+                <b>Получи результат</b>
+                <p>
+                    ИИ обработает фотографию
+                    и отправит готовый результат.
+                </p>
+            </div>
+        </div>
+    </section>
+    <section class="section">
+        <h2>
+            Что можно сделать?
+        </h2>
+        <div class="examples">
+            <div class="example">
+                🚗 Добавить рядом машину
+            </div>
+            <div class="example">
+                🏖️ Поменять фон
+            </div>
+            <div class="example">
+                👕 Изменить одежду
+            </div>
+            <div class="example">
+                🏙️ Переместить в другое место
+            </div>
+            <div class="example">
+                🖤 Сделать чёрно-белое фото
+            </div>
+            <div class="example">
+                ✨ Улучшить качество
+            </div>
+            <div class="example">
+                👤 Изменить отдельные детали
+            </div>
+            <div class="example">
+                🎬 Создать кинематографический стиль
+            </div>
+        </div>
+    </section>
+    <section class="section">
+        <h2>
+            ⭐ Пакеты генераций
+        </h2>
+        <div class="prices">
+            <div class="price">
+                <strong>
+                    50 ⭐
+                </strong>
+                <div class="photos">
+                    5 фотографий
+                </div>
+                <a
+                    class="buy"
+                    href="https://t.me/YOUR_BOT_USERNAME"
+                >
+                    Купить
+                </a>
+            </div>
+            <div class="price">
+                <strong>
+                    100 ⭐
+                </strong>
+                <div class="photos">
+                    10 фотографий
+                </div>
+                <a
+                    class="buy"
+                    href="https://t.me/YOUR_BOT_USERNAME"
+                >
+                    Купить
+                </a>
+            </div>
+            <div class="price">
+                <strong>
+                    150 ⭐
+                </strong>
+                <div class="photos">
+                    15 фотографий
+                </div>
+                <a
+                    class="buy"
+                    href="https://t.me/YOUR_BOT_USERNAME"
+                >
+                    Купить
+                </a>
+            </div>
+        </div>
+    </section>
+    <section class="section">
+        <h2>
+            🔐 Безопасность
+        </h2>
+        <p>
+            Фотографии используются только для выполнения
+            запроса пользователя. Не отправляй документы,
+            банковские данные и другую конфиденциальную информацию.
+        </p>
+    </section>
+    <section class="hero" style="margin-top:20px;">
+        <h2>
+            Готов попробовать?
+        </h2>
+        <p>
+            Получи 2 фотографии бесплатно.
+        </p>
+        <a
+            class="start"
+            href="https://t.me/YOUR_BOT_USERNAME"
+            target="_blank"
+        >
+            🚀 Запустить AI Photo
+        </a>
+    </section>
+    <footer class="footer">
+        AI Photo © 2026
+    </footer>
+</main>
+</body>
+</html>
