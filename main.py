@@ -11,47 +11,117 @@ from aiohttp import web
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
 users = {}
 
+# Хранилище: кто ждёт второе фото или промпт
+waiting_for_second_photo = {}  # user_id -> {"first_photo": file_id}
+waiting_for_prompt = {}        # user_id -> {"first_photo": file_id, "second_photo": file_id}
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     if user_id not in users:
         users[user_id] = {'last_free_date': None, 'paid_credits': 0}
-    await message.answer(
-        "Привет! Я бот для создания ИИ-фото. 🤖\n\n"
-        "📸 1 фото в день — бесплатно!\n"
-        "Остальное — за звёзды ⭐\n\n"
-        "Отправь мне своё фото и напиши, что нужно сделать (например, «поменяй фон на пляж»)."
-    )
+    if is_admin(user_id):
+        text = (
+            "Привет, админ! 👑\n\n"
+            "У тебя безлимит.\n\n"
+            "📸 Отправь первое фото (себя), потом второе (пример сцены)."
+        )
+    else:
+        text = (
+            "Привет! Я бот для создания ИИ-фото. 🤖\n\n"
+            "📸 1 фото в день — бесплатно!\n"
+            "Остальное — за звёзды ⭐\n\n"
+            "Как пользоваться:\n"
+            "1. Отправь своё фото (себя)\n"
+            "2. Потом отправь второе фото (пример: где хочешь оказаться)\n"
+            "3. Получи готовое фото!"
+        )
+    await message.answer(text)
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
     user_id = message.from_user.id
     user_data = users.get(user_id, {'last_free_date': None, 'paid_credits': 0})
     today = "2026-09-24"
-    if user_data['last_free_date'] == today and user_data['paid_credits'] <= 0:
-        await message.answer("На сегодня бесплатные фото закончились. 😔\nКупи пакет за звёзды! Напиши /buy.")
-        return
-    await message.answer("Фото получил! Генерирую... ⏳")
+
+    if not is_admin(user_id):
+        if user_data['last_free_date'] == today and user_data['paid_credits'] <= 0:
+            await message.answer("На сегодня бесплатные фото закончились. 😔\nКупи пакет за звёзды! Напиши /buy.")
+            return
+
     file_id = message.photo[-1].file_id
-    file = await bot.get_file(file_id)
-    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+    caption = message.caption
 
-    client_prompt = message.caption if message.caption else "high quality, detailed face, cinematic lighting"
+    # Если это первое фото (ещё нет waiting_for_second_photo)
+    if user_id not in waiting_for_second_photo:
+        waiting_for_second_photo[user_id] = {"first_photo": file_id}
+        await message.answer(
+            "Первое фото получил! 📸\n\n"
+            "Теперь отправь **второе фото** — пример сцены, куда хочешь попасть.\n"
+            "Например: фото пляжа, гор, другого города."
+        )
+        return
 
+    # Если это второе фото
+    if user_id in waiting_for_second_photo:
+        first_photo = waiting_for_second_photo[user_id]["first_photo"]
+        second_photo = file_id
+        waiting_for_second_photo.pop(user_id)
+
+        # Если есть подпись — сразу генерируем
+        if caption:
+            await generate_and_send(message, first_photo, second_photo, caption, user_id)
+        else:
+            # Если подписи нет — просим написать, что сделать
+            waiting_for_prompt[user_id] = {"first_photo": first_photo, "second_photo": second_photo}
+            await message.answer(
+                "Второе фото получил! 📸\n\n"
+                "Теперь напиши, что сделать. Например:\n"
+                "«Помести меня на этот пляж» или «Сделай меня в этой сцене»."
+            )
+        return
+
+@dp.message(F.text)
+async def handle_text(message: Message):
+    user_id = message.from_user.id
+    if user_id in waiting_for_prompt:
+        data = waiting_for_prompt.pop(user_id)
+        await generate_and_send(message, data["first_photo"], data["second_photo"], message.text, user_id)
+        return
+    if message.text.startswith("/"):
+        return
+    await message.answer("Отправь мне первое фото, потом второе — и я сделаю с ними то, что ты попросишь. 📸")
+
+async def generate_and_send(message: Message, first_photo_id: str, second_photo_id: str, prompt: str, user_id: int):
+    await message.answer("Генерирую... ⏳ (это займёт до 1 минуты)")
     try:
+        # Получаем ссылки на оба фото
+        file1 = await bot.get_file(first_photo_id)
+        file_url1 = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file1.file_path}"
+
+        file2 = await bot.get_file(second_photo_id)
+        file_url2 = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file2.file_path}"
+
+        # Вызываем модель multi-image-kontext-max
         final_output = replicate.run(
-            "black-forest-labs/flux-kontext-dev",
+            "flux-kontext-apps/multi-image-kontext-max",
             input={
-                "input_image": file_url,
-                "prompt": client_prompt,
+                "prompt": prompt,
+                "input_image_1": file_url1,
+                "input_image_2": file_url2,
                 "aspect_ratio": "1:1",
-                "output_format": "jpg"
+                "output_format": "jpg",
+                "safety_tolerance": 2
             }
         )
         if isinstance(final_output, list):
@@ -59,7 +129,7 @@ async def handle_photo(message: Message):
         else:
             result_url = str(final_output)
         await message.answer_photo(result_url, caption="Готово! 🎉")
-        users[user_id]['last_free_date'] = today
+        users[user_id]['last_free_date'] = "2026-09-24"
     except Exception as e:
         await message.answer(f"Ошибка генерации: {e}")
 
