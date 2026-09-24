@@ -26,7 +26,7 @@ async def cmd_start(message: Message):
         "Привет! Я бот для создания ИИ-фото. 🤖\n\n"
         "📸 1 фото в день — бесплатно!\n"
         "Остальное — за звёзды ⭐\n\n"
-        "Просто отправь мне своё фото!"
+        "Просто отправь мне своё фото и напиши, что нужно сделать (например, «поменяй фон на пляж»)."
     )
 
 @dp.message(F.photo)
@@ -41,23 +41,31 @@ async def handle_photo(message: Message):
     file_id = message.photo[-1].file_id
     file = await bot.get_file(file_id)
     file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+
+    # Берём текст, который клиент написал к фото, или ставим стандартный
+    client_prompt = message.caption if message.caption else "high quality, detailed face, cinematic lighting"
+
     try:
+        # Шаг 1: Сохраняем лицо с помощью fofr/face-to-many
         face_output = replicate.run(
             "fofr/face-to-many:a07f252abbbd832009640b27f063ea52d87d7a23a185ca165bec23b5adc8deaf",
             input={
                 "image": file_url,
                 "style": "Video game",
-                "prompt": "high quality, detailed face, cinematic lighting",
+                "prompt": client_prompt,
                 "negative_prompt": "blurry, low quality, distorted",
                 "instant_id_strength": 1.0
             }
         )
-        face_image_url = face_output[0].url() if isinstance(face_output, list) else str(face_output)
+        # Получаем URL сгенерированного изображения (без скобок, url — это свойство)
+        face_image_url = face_output[0].url if isinstance(face_output, list) else str(face_output)
+
+        # Шаг 2: Редактируем изображение по запросу клиента
         final_output = replicate.run(
             "black-forest-labs/flux-kontext-dev",
             input={
                 "image": face_image_url,
-                "prompt": "change the background to a beach, keep the person exactly the same",
+                "prompt": client_prompt,
                 "aspect_ratio": "1:1"
             }
         )
