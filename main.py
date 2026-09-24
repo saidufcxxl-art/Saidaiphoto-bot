@@ -1,0 +1,91 @@
+import asyncio
+import logging
+import os
+import replicate
+from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, LabeledPrice
+
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+logging.basicConfig(level=logging.INFO)
+
+users = {}
+
+class Form(StatesGroup):
+    waiting_for_photo = State()
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    user_id = message.from_user.id
+    if user_id not in users:
+        users[user_id] = {'last_free_date': None, 'paid_credits': 0}
+    await message.answer(
+        "Привет! Я бот для создания ИИ-фото. 🤖\n\n"
+        "📸 1 фото в день — бесплатно!\n"
+        "Остальное — за звёзды ⭐\n\n"
+        "Просто отправь мне своё фото!"
+    )
+
+@dp.message(F.photo)
+async def handle_photo(message: Message):
+    user_id = message.from_user.id
+    user_data = users.get(user_id, {'last_free_date': None, 'paid_credits': 0})
+    today = "2026-09-24"
+    if user_data['last_free_date'] == today and user_data['paid_credits'] <= 0:
+        await message.answer(
+            "На сегодня бесплатные фото закончились. 😔\n"
+            "Купи пакет за звёзды! Напиши /buy."
+        )
+        return
+    await message.answer("Фото получил! Генерирую... ⏳")
+    file_id = message.photo[-1].file_id
+    file = await bot.get_file(file_id)
+    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+    try:
+        output = replicate.run(
+            "black-forest-labs/flux-2-pro",
+            input={
+                "image": file_url,
+                "prompt": "Фотореалистичный портрет, высокое качество, детализированное лицо",
+                "aspect_ratio": "1:1"
+            }
+        )
+        await message.answer_photo(output[0], caption="Готово! 🎉")
+        users[user_id]['last_free_date'] = today
+    except Exception as e:
+        await message.answer(f"Ошибка генерации: {e}")
+
+@dp.message(Command("buy"))
+async def cmd_buy(message: Message):
+    prices = [LabeledPrice(label="Пакет 'Мини' (5 фото)", amount=150)]
+    await message.answer_invoice(
+        title="Пакет ИИ-фото",
+        description="5 генераций без водяного знака",
+        payload="buy_5_credits",
+        currency="XTR",
+        prices=prices
+    )
+
+@dp.pre_checkout_query()
+async def process_pre_checkout_query(pre_checkout_query: types.PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@dp.message(F.successful_payment)
+async def process_successful_payment(message: Message):
+    user_id = message.from_user.id
+    users[user_id]['paid_credits'] += 5
+    await message.answer("Оплата прошла! Начислено 5 кредитов. 🎉")
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
