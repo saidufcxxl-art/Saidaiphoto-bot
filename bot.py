@@ -1,21 +1,23 @@
-AI Photo Bot — OpenAI + Telegram + Telegram Stars
+# Telegram AI Photo Bot — Replicate / FLUX.2 Max
 
-1. Replace your bot.py with the included bot.py.
-2. Add the included requirements.txt to the repository.
-3. In Render:
-   Build Command: pip install -r requirements.txt
-   Start Command: python bot.py
-4. Set these Environment Variables in Render:
-   BOT_TOKEN=...
-   OPENAI_API_KEY=...
-   ADMIN_IDS=123456789
-   PORT=10000
-5. Optional: set PYTHON_VERSION=3.13.5 in Render.
+## Environment variables on Render
 
-Important:
-- Do NOT put your OpenAI API key into the Python source code.
-- Replicate is no longer used.
-- The bot supports up to 2 reference photos.
-- The credit is charged only after OpenAI successfully returns an image.
-- User balances are currently stored in RAM and reset after a restart/redeploy.
-  For a paid production bot, move balances to PostgreSQL/another database.
+- BOT_TOKEN
+- REPLICATE_API_TOKEN
+- ADMIN_IDS
+- PORT=10000
+
+## Model
+
+black-forest-labs/flux-2-max
+
+The bot accepts 1–2 reference photos and then a text instruction.
+Telegram Stars packages:
+- 50 Stars = 5 generations
+- 100 Stars = 10 generations
+- 150 Stars = 15 generations
+- 2 free generations per user
+- Admin IDs = unlimited
+
+Important: balances are stored in RAM and reset after a Render restart/redeploy.
+For a real paid production bot, move balances to SQLite/Postgres later.
