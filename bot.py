@@ -7,17 +7,28 @@ import replicate
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import LabeledPrice, Message, PreCheckoutQuery
+from aiogram.types import LabeledPrice, PreCheckoutQuery, Update
 
+
+# =========================
+# НАСТРОЙКИ
+# =========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+
 ADMIN_IDS = {
     int(x.strip())
     for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 }
+
 PORT = int(os.getenv("PORT", "10000"))
+
+WEBHOOK_PATH = "/telegram-webhook"
+
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден")
@@ -25,10 +36,23 @@ if not BOT_TOKEN:
 if not REPLICATE_API_TOKEN:
     raise RuntimeError("REPLICATE_API_TOKEN не найден")
 
+if not WEBHOOK_URL:
+    raise RuntimeError("WEBHOOK_URL не найден")
+
+
 os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_TOKEN
 
 
+# =========================
+# REPLICATE
+# =========================
+
 MODEL = "black-forest-labs/flux-2-max"
+
+
+# =========================
+# БАЛАНСЫ
+# =========================
 
 FREE_GENERATIONS = 2
 
@@ -38,9 +62,14 @@ PACKAGES = {
     150: 15,
 }
 
+
 users = {}
 pending_photos = {}
 
+
+# =========================
+# ЛОГИ
+# =========================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,9 +78,18 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
+# =========================
+# TELEGRAM
+# =========================
+
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
+
+# =========================
+# ПОЛЬЗОВАТЕЛЬ
+# =========================
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
@@ -68,25 +106,35 @@ def get_user(user_id):
 
 
 def balance_text(user_id):
+
     if is_admin(user_id):
         return "👑 Админ: без ограничений"
 
-    user = get_user(user_id)
+    u = get_user(user_id)
 
     return (
-        f"🎁 Бесплатных: {user['free']}\n"
-        f"⭐ Платных: {user['balance']}"
+        f"🎁 Бесплатных: {u['free']}\n"
+        f"⭐ Платных: {u['balance']}"
     )
 
 
+# =========================
+# ГЕНЕРАЦИЯ
+# =========================
+
 async def generate_image(image_bytes_list, prompt):
+
     files = []
 
     try:
+
         for i, data in enumerate(image_bytes_list):
-            file = BytesIO(data)
-            file.name = f"reference_{i + 1}.jpg"
-            files.append(file)
+
+            f = BytesIO(data)
+            f.name = f"reference_{i + 1}.jpg"
+
+            files.append(f)
+
 
         result = await asyncio.to_thread(
             replicate.run,
@@ -104,17 +152,23 @@ async def generate_image(image_bytes_list, prompt):
                     "USER REQUEST:\n"
                     + prompt
                 ),
+
                 "input_images": files,
+
                 "resolution": "2 MP",
                 "aspect_ratio": "match_input_image",
+
                 "output_format": "jpg",
                 "output_quality": 100,
+
                 "safety_tolerance": 2,
-            },
+            }
         )
+
 
         if hasattr(result, "read"):
             return result.read()
+
 
         if (
             isinstance(result, (list, tuple))
@@ -123,17 +177,25 @@ async def generate_image(image_bytes_list, prompt):
         ):
             return result[0].read()
 
+
         raise RuntimeError(
             f"Неожиданный формат ответа Replicate: {type(result)}"
         )
 
-    finally:
-        for file in files:
-            file.close()
 
+    finally:
+
+        for f in files:
+            f.close()
+
+
+# =========================
+# /START
+# =========================
 
 @dp.message(Command("start"))
-async def start(message: Message):
+async def start(message):
+
     get_user(message.from_user.id)
 
     await message.answer(
@@ -149,24 +211,42 @@ async def start(message: Message):
     )
 
 
+# =========================
+# /BALANCE
+# =========================
+
 @dp.message(Command("balance"))
-async def balance(message: Message):
+async def balance(message):
+
     await message.answer(
         balance_text(message.from_user.id)
     )
 
 
+# =========================
+# /CLEAR
+# =========================
+
 @dp.message(Command("clear"))
-async def clear(message: Message):
-    pending_photos.pop(message.from_user.id, None)
+async def clear(message):
+
+    pending_photos.pop(
+        message.from_user.id,
+        None
+    )
 
     await message.answer(
         "🗑 Фото очищены."
     )
 
 
+# =========================
+# /BUY
+# =========================
+
 @dp.message(Command("buy"))
-async def buy(message: Message):
+async def buy(message):
+
     await message.answer(
         "⭐ Пакеты:\n\n"
         "50 Stars → 5 генераций\n"
@@ -178,68 +258,128 @@ async def buy(message: Message):
     )
 
 
-async def send_invoice(message, stars, generations):
+# =========================
+# ОПЛАТА
+# =========================
+
+async def send_invoice(
+    message,
+    stars,
+    generations
+):
+
     await message.answer_invoice(
         title=f"{generations} генераций",
-        description=f"Пакет из {generations} генераций фотографий",
+
+        description=(
+            f"Пакет из {generations} "
+            f"генераций фотографий"
+        ),
+
         payload=f"photo_pack_{stars}_{generations}",
+
         currency="XTR",
+
         prices=[
             LabeledPrice(
                 label=f"{generations} генераций",
                 amount=stars
             )
         ],
+
         provider_token=""
     )
 
 
 @dp.message(Command("buy50"))
-async def buy50(message: Message):
-    await send_invoice(message, 50, 5)
+async def buy50(message):
+
+    await send_invoice(
+        message,
+        50,
+        5
+    )
 
 
 @dp.message(Command("buy100"))
-async def buy100(message: Message):
-    await send_invoice(message, 100, 10)
+async def buy100(message):
+
+    await send_invoice(
+        message,
+        100,
+        10
+    )
 
 
 @dp.message(Command("buy150"))
-async def buy150(message: Message):
-    await send_invoice(message, 150, 15)
+async def buy150(message):
 
+    await send_invoice(
+        message,
+        150,
+        15
+    )
+
+
+# =========================
+# PRE CHECKOUT
+# =========================
 
 @dp.pre_checkout_query()
-async def pre_checkout(query: PreCheckoutQuery):
-    await query.answer(ok=True)
+async def pre_checkout(
+    query: PreCheckoutQuery
+):
 
+    await query.answer(
+        ok=True
+    )
+
+
+# =========================
+# УСПЕШНАЯ ОПЛАТА
+# =========================
 
 @dp.message(F.successful_payment)
-async def successful_payment(message: Message):
+async def successful_payment(message):
+
     try:
-        _, stars, generations = (
-            message.successful_payment.invoice_payload.split("_")
-        )
+
+        (
+            _,
+            stars,
+            generations
+        ) = message.successful_payment.invoice_payload.split("_")
 
         stars = int(stars)
         generations = int(generations)
 
     except Exception:
+
         await message.answer(
-            "⚠️ Оплата получена, но пакет не удалось определить."
+            "⚠️ Оплата получена, "
+            "но пакет не удалось определить."
         )
+
         return
+
 
     if (
         stars not in PACKAGES
         or PACKAGES[stars] != generations
     ):
+
         await message.answer(
-            "⚠️ Некорректный пакет. Обратись к администратору."
+            "⚠️ Некорректный пакет. "
+            "Обратись к администратору."
         )
+
         return
 
-    get_user(message.from_user.id)["balance"] += generations
+
+    get_user(
+        message.from_user.id
+    )["balance"] += generations
+
 
     await message.answer(
         f"✅ Оплата прошла!\n\n"
@@ -248,105 +388,144 @@ async def successful_payment(message: Message):
     )
 
 
+# =========================
+# ПОЛУЧИЛИ ФОТО
+# =========================
+
 @dp.message(F.photo)
-async def photo_received(message: Message):
-    user_id = message.from_user.id
+async def photo_received(message):
+
+    uid = message.from_user.id
 
     photos = pending_photos.setdefault(
-        user_id,
+        uid,
         []
     )
 
+
     if len(photos) >= 2:
+
         await message.answer(
-            "⚠️ Максимум 2 фото. "
+            "⚠️ Максимум 2 фото.\n"
             "Теперь напиши, что нужно сделать."
         )
+
         return
 
+
     photo = message.photo[-1]
+
 
     tg_file = await bot.get_file(
         photo.file_id
     )
 
-    buffer = BytesIO()
+
+    buf = BytesIO()
+
 
     await bot.download_file(
         tg_file.file_path,
-        buffer
+        buf
     )
+
 
     photos.append(
-        buffer.getvalue()
+        buf.getvalue()
     )
 
+
     if len(photos) == 1:
+
         await message.answer(
-            "📸 Фото получил. "
-            "Можешь отправить второе или написать, "
-            "что изменить."
+            "📸 Фото получил.\n\n"
+            "Можешь отправить второе "
+            "или написать, что изменить."
         )
+
     else:
+
         await message.answer(
-            "📸 Второе фото получил. "
+            "📸 Второе фото получил.\n\n"
             "Теперь напиши, что нужно сделать."
         )
 
 
+# =========================
+# ТЕКСТОВЫЙ ПРОМПТ
+# =========================
+
 @dp.message(F.text)
-async def text_prompt(message: Message):
-    user_id = message.from_user.id
+async def text_prompt(message):
+
+    uid = message.from_user.id
 
     prompt = message.text.strip()
+
 
     if prompt.startswith("/"):
         return
 
+
     photos = pending_photos.get(
-        user_id,
+        uid,
         []
     )
 
+
     if not photos:
+
         await message.answer(
             "📸 Сначала отправь фотографию."
         )
+
         return
 
-    user = get_user(user_id)
+
+    u = get_user(uid)
+
 
     if (
-        not is_admin(user_id)
-        and user["free"] <= 0
-        and user["balance"] <= 0
+        not is_admin(uid)
+        and u["free"] <= 0
+        and u["balance"] <= 0
     ):
+
         await message.answer(
             "❌ Генерации закончились.\n\n"
-            "Используй /buy, чтобы купить новые ⭐"
+            "Используй /buy, "
+            "чтобы купить новые ⭐"
         )
+
         return
+
 
     status = await message.answer(
         "⏳ Генерирую фотографию..."
     )
 
+
     try:
+
         image = await generate_image(
             photos,
             prompt
         )
 
-        if not is_admin(user_id):
-            if user["free"] > 0:
-                user["free"] -= 1
+
+        # Списываем только после успешной генерации
+        if not is_admin(uid):
+
+            if u["free"] > 0:
+                u["free"] -= 1
+
             else:
-                user["balance"] -= 1
+                u["balance"] -= 1
+
 
         await status.delete()
 
-        # Отправляем именно как фотографию,
-        # а не как документ
+
         await message.answer_photo(
             types.BufferedInputFile(
                 image,
@@ -355,77 +534,201 @@ async def text_prompt(message: Message):
             caption="✨ Готово!"
         )
 
+
         pending_photos.pop(
-            user_id,
+            uid,
             None
         )
 
+
     except Exception:
+
         logger.exception(
             "Ошибка генерации через Replicate"
         )
 
+
         await status.edit_text(
-            "❌ Не удалось создать фотографию.\n"
-            "Попробуй ещё раз. "
+            "❌ Не удалось создать фотографию.\n\n"
+            "Попробуй ещё раз.\n"
             "Генерация не списана."
         )
 
 
+# =========================
+# HEALTH CHECK
+# =========================
+
 async def health(request):
+
     return web.Response(
         text="OK"
     )
 
 
+# =========================
+# TELEGRAM WEBHOOK
+# =========================
+
+async def telegram_webhook(request):
+
+    # Защита webhook
+    if WEBHOOK_SECRET:
+
+        received_secret = request.headers.get(
+            "X-Telegram-Bot-Api-Secret-Token"
+        )
+
+        if received_secret != WEBHOOK_SECRET:
+
+            return web.Response(
+                status=403,
+                text="Forbidden"
+            )
+
+
+    try:
+
+        data = await request.json()
+
+        update = Update.model_validate(
+            data
+        )
+
+        await dp.feed_update(
+            bot,
+            update
+        )
+
+        return web.Response(
+            text="OK"
+        )
+
+
+    except Exception:
+
+        logger.exception(
+            "Ошибка Telegram webhook"
+        )
+
+        return web.Response(
+            status=500,
+            text="ERROR"
+        )
+
+
+# =========================
+# WEB SERVER
+# =========================
+
 async def start_web_server():
+
     app = web.Application()
+
 
     app.router.add_get(
         "/",
         health
     )
 
+
     app.router.add_get(
         "/health",
         health
     )
 
-    runner = web.AppRunner(app)
+
+    app.router.add_post(
+        WEBHOOK_PATH,
+        telegram_webhook
+    )
+
+
+    runner = web.AppRunner(
+        app
+    )
 
     await runner.setup()
 
-    await web.TCPSite(
+
+    site = web.TCPSite(
         runner,
         "0.0.0.0",
         PORT
-    ).start()
+    )
+
+
+    await site.start()
+
 
     logger.info(
-        "Health server started on port %s",
+        "Web server started on port %s",
         PORT
     )
+
 
     return runner
 
 
+# =========================
+# MAIN
+# =========================
+
 async def main():
+
     logger.info(
         "Starting Telegram bot with %s",
         MODEL
     )
 
+
     runner = await start_web_server()
 
+
+    webhook_full_url = (
+        WEBHOOK_URL.rstrip("/")
+        + WEBHOOK_PATH
+    )
+
+
     try:
-        await dp.start_polling(
-            bot
+
+        await bot.set_webhook(
+            url=webhook_full_url,
+
+            secret_token=(
+                WEBHOOK_SECRET
+                if WEBHOOK_SECRET
+                else None
+            ),
+
+            drop_pending_updates=False
         )
 
+
+        logger.info(
+            "Telegram webhook установлен: %s",
+            webhook_full_url
+        )
+
+
+        # Просто держим сервер запущенным
+        await asyncio.Event().wait()
+
+
     finally:
+
         await runner.cleanup()
+
         await bot.session.close()
 
 
+# =========================
+# START
+# =========================
+
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    asyncio.run(
+        main()
+    )
