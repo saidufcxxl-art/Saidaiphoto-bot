@@ -16,7 +16,11 @@ from aiogram.types import LabeledPrice, PreCheckoutQuery, Update
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+# Render автоматически даёт этот адрес
+WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")
+
+# Можно оставить пустым
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 ADMIN_IDS = {
@@ -30,6 +34,10 @@ PORT = int(os.getenv("PORT", "10000"))
 WEBHOOK_PATH = "/telegram-webhook"
 
 
+# =========================
+# ПРОВЕРКА НАСТРОЕК
+# =========================
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден")
 
@@ -37,7 +45,10 @@ if not REPLICATE_API_TOKEN:
     raise RuntimeError("REPLICATE_API_TOKEN не найден")
 
 if not WEBHOOK_URL:
-    raise RuntimeError("WEBHOOK_URL не найден")
+    raise RuntimeError(
+        "RENDER_EXTERNAL_URL не найден. "
+        "Убедись, что Render service создан как Web Service."
+    )
 
 
 os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_TOKEN
@@ -61,7 +72,6 @@ PACKAGES = {
     100: 10,
     150: 15,
 }
-
 
 users = {}
 pending_photos = {}
@@ -154,13 +164,10 @@ async def generate_image(image_bytes_list, prompt):
                 ),
 
                 "input_images": files,
-
                 "resolution": "2 MP",
                 "aspect_ratio": "match_input_image",
-
                 "output_format": "jpg",
                 "output_quality": 100,
-
                 "safety_tolerance": 2,
             }
         )
@@ -259,7 +266,7 @@ async def buy(message):
 
 
 # =========================
-# ОПЛАТА
+# INVOICE
 # =========================
 
 async def send_invoice(
@@ -326,13 +333,9 @@ async def buy150(message):
 # =========================
 
 @dp.pre_checkout_query()
-async def pre_checkout(
-    query: PreCheckoutQuery
-):
+async def pre_checkout(query: PreCheckoutQuery):
 
-    await query.answer(
-        ok=True
-    )
+    await query.answer(ok=True)
 
 
 # =========================
@@ -389,7 +392,7 @@ async def successful_payment(message):
 
 
 # =========================
-# ПОЛУЧИЛИ ФОТО
+# ФОТО
 # =========================
 
 @dp.message(F.photo)
@@ -415,20 +418,16 @@ async def photo_received(message):
 
     photo = message.photo[-1]
 
-
     tg_file = await bot.get_file(
         photo.file_id
     )
 
-
     buf = BytesIO()
-
 
     await bot.download_file(
         tg_file.file_path,
         buf
     )
-
 
     photos.append(
         buf.getvalue()
@@ -452,7 +451,7 @@ async def photo_received(message):
 
 
 # =========================
-# ТЕКСТОВЫЙ ПРОМПТ
+# ТЕКСТ
 # =========================
 
 @dp.message(F.text)
@@ -518,7 +517,6 @@ async def text_prompt(message):
 
             if u["free"] > 0:
                 u["free"] -= 1
-
             else:
                 u["balance"] -= 1
 
@@ -547,7 +545,6 @@ async def text_prompt(message):
             "Ошибка генерации через Replicate"
         )
 
-
         await status.edit_text(
             "❌ Не удалось создать фотографию.\n\n"
             "Попробуй ещё раз.\n"
@@ -556,7 +553,7 @@ async def text_prompt(message):
 
 
 # =========================
-# HEALTH CHECK
+# HEALTH
 # =========================
 
 async def health(request):
@@ -572,7 +569,7 @@ async def health(request):
 
 async def telegram_webhook(request):
 
-    # Защита webhook
+    # Если секрет задан — проверяем его
     if WEBHOOK_SECRET:
 
         received_secret = request.headers.get(
@@ -591,9 +588,7 @@ async def telegram_webhook(request):
 
         data = await request.json()
 
-        update = Update.model_validate(
-            data
-        )
+        update = Update.model_validate(data)
 
         await dp.feed_update(
             bot,
@@ -644,9 +639,7 @@ async def start_web_server():
     )
 
 
-    runner = web.AppRunner(
-        app
-    )
+    runner = web.AppRunner(app)
 
     await runner.setup()
 
@@ -656,7 +649,6 @@ async def start_web_server():
         "0.0.0.0",
         PORT
     )
-
 
     await site.start()
 
@@ -712,7 +704,7 @@ async def main():
         )
 
 
-        # Просто держим сервер запущенным
+        # Сервер работает постоянно
         await asyncio.Event().wait()
 
 
@@ -729,6 +721,4 @@ async def main():
 
 if __name__ == "__main__":
 
-    asyncio.run(
-        main()
-    )
+    asyncio.run(main())
