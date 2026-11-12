@@ -7,6 +7,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
 from openai import OpenAI
 
+# Настройки
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_ID = os.getenv("ADMIN")
@@ -18,6 +19,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 ai = OpenAI(api_key=OPENAI_API_KEY)
 
+# Инструкция для искусственного интеллекта
 SYSTEM = """
 Ты — SAID AI MANAGER, профессиональный менеджер по работе с клиентами.
 
@@ -54,6 +56,7 @@ BUSINESS — от 10000 рублей.
 7. Отвечай понятно и не слишком длинно.
 """
 
+# Команда /start
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer(
@@ -64,6 +67,7 @@ async def start(message: Message):
         "Напишите, какой бот вам нужен."
     )
 
+# Команда /help
 @dp.message(Command("help"))
 async def help_command(message: Message):
     await message.answer(
@@ -71,6 +75,7 @@ async def help_command(message: Message):
         "ценах и возможностях автоматизации бизнеса."
     )
 
+# Ответы на сообщения
 @dp.message(F.chat.type == "private", F.text)
 async def answer(message: Message):
     await bot.send_chat_action(message.chat.id, "typing")
@@ -98,8 +103,14 @@ async def answer(message: Message):
             "Извините, произошла техническая ошибка. Попробуйте позже."
         )
 
+# Запуск бота
 async def main():
     logging.basicConfig(level=logging.INFO)
+
+    # Отключаем старый Webhook
+    await bot.delete_webhook(drop_pending_updates=True)
+
+    # Запускаем бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
