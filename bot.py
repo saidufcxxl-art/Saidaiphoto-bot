@@ -1,25 +1,40 @@
 import os
-import asyncio
 import logging
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
-from openai import OpenAI
+from aiogram.webhook.aiohttp_server import (
+    SimpleRequestHandler,
+    setup_application
+)
+from openai import AsyncOpenAI
 
 # Настройки
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ADMIN_ID = os.getenv("ADMIN")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+PORT = int(os.getenv("PORT", "10000"))
 
-if not BOT_TOKEN or not OPENAI_API_KEY:
-    raise ValueError("BOT_TOKEN or OPENAI_API_KEY is missing")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN is missing")
 
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY is missing")
+
+if not RENDER_EXTERNAL_URL:
+    raise ValueError("RENDER_EXTERNAL_URL is missing")
+
+# Подключение
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-ai = OpenAI(api_key=OPENAI_API_KEY)
+ai = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# Инструкция для искусственного интеллекта
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = RENDER_EXTERNAL_URL.rstrip("/") + WEBHOOK_PATH
+
+# Инструкция для ИИ
 SYSTEM = """
 Ты — SAID AI MANAGER, профессиональный менеджер по работе с клиентами.
 
@@ -56,7 +71,7 @@ BUSINESS — от 10000 рублей.
 7. Отвечай понятно и не слишком длинно.
 """
 
-# Команда /start
+# Старт
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer(
@@ -67,7 +82,7 @@ async def start(message: Message):
         "Напишите, какой бот вам нужен."
     )
 
-# Команда /help
+# Помощь
 @dp.message(Command("help"))
 async def help_command(message: Message):
     await message.answer(
@@ -75,14 +90,13 @@ async def help_command(message: Message):
         "ценах и возможностях автоматизации бизнеса."
     )
 
-# Ответы на сообщения
+# Ответы ИИ
 @dp.message(F.chat.type == "private", F.text)
 async def answer(message: Message):
     await bot.send_chat_action(message.chat.id, "typing")
 
     try:
-        response = await asyncio.to_thread(
-            ai.chat.completions.create,
+        response = await ai.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": SYSTEM},
@@ -103,15 +117,33 @@ async def answer(message: Message):
             "Извините, произошла техническая ошибка. Попробуйте позже."
         )
 
-# Запуск бота
-async def main():
-    logging.basicConfig(level=logging.INFO)
+# Установка Webhook
+async def on_startup(bot: Bot):
+    await bot.set_webhook(WEBHOOK_URL)
+    logging.info("Webhook установлен: %s", WEBHOOK_URL)
 
-    # Отключаем старый Webhook
-    await bot.delete_webhook(drop_pending_updates=True)
+# Создание HTTP-сервера
+async def on_shutdown(bot: Bot):
+    await bot.delete_webhook()
+    await bot.session.close()
 
-    # Запускаем бота
-    await dp.start_polling(bot)
+dp.startup.register(on_startup)
+dp.shutdown.register(on_shutdown)
+
+app = web.Application()
+
+SimpleRequestHandler(
+    dispatcher=dp,
+    bot=bot
+).register(app, path=WEBHOOK_PATH)
+
+setup_application(app, dp, bot=bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    logging.basicConfig(level=logging.INFO)
+
+    web.run_app(
+        app,
+        host="0.0.0.0",
+        port=PORT
+    )
